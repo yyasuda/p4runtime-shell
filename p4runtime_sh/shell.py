@@ -2278,6 +2278,32 @@ def Write(input_):
             "Write only works with files at the moment and '{}' is not a file".format(
                 input_))
 
+def Request(input_):
+    """
+    Reads a StreamMessageRequest from a file (text format) and sends it to the server.
+    It rewrites the device id and election id appropriately.
+    """
+    req = p4runtime_pb2.StreamMessageRequest()
+    if os.path.isfile(input_):
+        with open(input_, 'r') as f:
+            google.protobuf.text_format.Merge(f.read(), req)
+        print(req)
+        client.stream_out_q.put(req)
+    else:
+        raise UserError(
+            "Request only works with files at the moment and '{}' is not a file".format(
+                input_))
+
+def Watch():
+    """
+    Reads a StreamMessageResponse from the server .
+    """
+    rep = client.get_stream_packet("packet", timeout=3)
+    if rep is None:
+        print("None returned")
+        return
+    print("Response message is:")
+    print(rep)
 
 def APIVersion():
     """
@@ -2416,6 +2442,8 @@ def main():
         "Oneshot": Oneshot,
         "p4info": context.p4info,
         "Write": Write,
+        "Request": Request,
+        "Watch": Watch,
         "Replica": Replica,
         "MulticastGroupEntry": MulticastGroupEntry,
         "CloneSessionEntry": CloneSessionEntry,
