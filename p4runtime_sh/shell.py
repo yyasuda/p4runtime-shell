@@ -2277,6 +2277,14 @@ def Write(input_):
         raise UserError(
             "Write only works with files at the moment and '{}' is not a file".format(
                 input_))
+""" 
+    ============================================================================== 
+    Exteneded for NanoSwitch tutorial
+    ============================================================================== 
+"""
+
+# we use 1 as default for flooding multicast group id. 
+FLOOD_GRP = b'\x00\x01'
 
 def Request(input_):
     """
@@ -2296,7 +2304,7 @@ def Request(input_):
 
 def Watch():
     """
-    Reads a StreamMessageResponse from the server .
+    Reads a StreamMessageResponse from the server.
     """
     rep = client.get_stream_packet("packet", timeout=3)
     if rep is None:
@@ -2304,6 +2312,181 @@ def Watch():
         return
     print("Response message is:")
     print(rep)
+    return rep
+
+def mac2str(mac):
+    return ':'.join('{:02x}'.format(b) for b in mac)
+
+def insertFlowEntry(dstMac, srcMac, port):
+    print("## INSERT ## dst={0} src={1} port={2}" 
+            .format(mac2str(dstMac), mac2str(srcMac), int.from_bytes(port, byteorder='big')))
+
+    req = p4runtime_pb2.WriteRequest()
+    update = req.updates.add()
+    update.type = p4runtime_pb2.Update.INSERT
+
+    table_entry = update.entity.table_entry
+    table_entry.table_id = context.get_obj_id(P4Type.table, "MyIngress.l2_match_table") # 33609159 
+    m1 = p4runtime_pb2.FieldMatch()
+    m1.field_id = context.get_mf_id("MyIngress.l2_match_table", "hdr.ethernet.dstAddr") # 1 
+    m1.exact.value = dstMac
+    m2 = p4runtime_pb2.FieldMatch()
+    m2.field_id = context.get_mf_id("MyIngress.l2_match_table", "hdr.ethernet.srcAddr") # 2
+    m2.exact.value = srcMac
+    table_entry.match.append(m1)
+    table_entry.match.append(m2)
+
+    action = table_entry.action.action
+    action.action_id = context.get_obj_id(P4Type.action, "MyIngress.forward") # 16838673 
+    param = p4runtime_pb2.Action.Param()    
+    param.param_id = context.get_param_id("MyIngress.forward", "port") # 1
+    param.value = port 
+    action.params.append(param)
+
+    # print(req)
+    client.write(req)
+
+# macTable = [ mac: port ] - store mac and port of source host
+macTable = {}
+
+def metadata_value(repeated_metadata, cpm_name, metadata_name):
+    """
+    extract value of the packet-i/o data of controller_packet_metadata,
+    specified by "packet_in", "ingress_port" or equivalent fashion.
+    """
+    metadata_id = context.get_cpm_id(cpm_name, metadata_name)
+    if metadata_id is None:
+        return None
+    for metadata in repeated_metadata:
+        if metadata.metadata_id == metadata_id:
+            return metadata.value
+    return None
+
+def packetin_process(pin):
+    """
+    packet-in processing
+    1. send back it as flooding-packet
+    2. record srcmac + port 
+    3. if dstmac recorded, set bi-directional flow entry between src and dst
+    """
+    # flood the incoming packet as packet-out 
+    port = metadata_value(pin.packet.metadata, "packet_in", "ingress_port") # original ingres_port
+    mcast_grp = FLOOD_GRP 
+    payload = pin.packet.payload
+    PacketOut(port, mcast_grp, payload)
+
+    dstMac = payload[0:6]
+    srcMac = payload[6:12]
+    print("\n======\npacket-in: dst={0} src={1} port={2}"
+            .format(mac2str(dstMac), mac2str(srcMac), int.from_bytes(port, byteorder='big')))
+    # if the source is new, record it with ingress port
+    if srcMac not in macTable:
+        macTable[ srcMac ] = port
+    # when destnation is broadcast, no need to record it
+    if dstMac == b'\xff\xff\xff\xff\xff\xff':
+        print("broadcast!")
+    else:
+        if dstMac in macTable: # if the destination is recorderd, set entry
+            insertFlowEntry(dstMac, srcMac, macTable[ dstMac ])
+            insertFlowEntry(srcMac, dstMac, macTable[ srcMac ])
+
+    print("macTable (mac - port)")
+    for key, value in macTable.items():
+        print(" {0} - port({1})"
+                .format(mac2str(key), int.from_bytes(value, byteorder='big')))
+    
+def PacketIn():
+    """
+    Wait a StreamMessageResponse from the server, then pass it packetin_process()
+    """
+    try:
+        count = 0
+        while True:
+            if count % 10 == 0:
+                print("")
+            count +=1
+            print(".", end="", flush=True)
+            rep = client.get_stream_packet("packet", timeout=1)
+            if rep is not None:
+                # print("\nResponse message is:")
+                # print(rep)
+                packetin_process(rep)
+                # return rep # if you want to check the response, just return 
+    except KeyboardInterrupt:
+        print("\nNothing (returned None)")
+        return None # nothing to do. just return.
+
+def PacketOut(port, mcast_grp, payload):
+    """
+    Send StreamMessageRequest
+
+    """
+    req = p4runtime_pb2.StreamMessageRequest()
+    packet = req.packet
+    packet.payload = payload
+
+    metadata = p4runtime_pb2.PacketMetadata()
+    metadata.metadata_id = context.get_cpm_id("packet_out", "egress_port") # 1
+    metadata.value = port
+    packet.metadata.append(metadata)
+    metadata.metadata_id = context.get_cpm_id("packet_out", "mcast_grp") # 3
+    metadata.value = mcast_grp
+    packet.metadata.append(metadata)
+
+    # print(req)
+    client.stream_out_q.put(req)
+
+def Test():
+    print(context.get_obj_id(P4Type.controller_packet_metadata, "packet_in"))
+    print(context.get_cpm_id("packet_in", "ingress_port"))
+    print(context.get_cpm_name("packet_out", 3))
+    return
+    print(context.get_obj_id(P4Type.table, "MyIngress.l2_match_table"))
+    print(context.get_mf_id("MyIngress.l2_match_table", "hdr.ethernet.dstAddr"))
+    print(context.get_mf_id("MyIngress.l2_match_table", "hdr.ethernet.srcAddr"))
+    print(context.get_obj_id(P4Type.action, "MyIngress.forward"))
+    print(context.get_param_id("MyIngress.forward", "port"))
+
+    req = p4runtime_pb2.WriteRequest()
+    update = req.updates.add()
+    update.type = p4runtime_pb2.Update.INSERT
+
+    table_entry = update.entity.table_entry
+    table_entry.table_id = context.get_obj_id(P4Type.table, "MyIngress.l2_match_table") # 33609159 
+    m1 = p4runtime_pb2.FieldMatch()
+    m1.field_id = context.get_mf_id("MyIngress.l2_match_table", "hdr.ethernet.dstAddr") # 1 
+    m1.exact.value = b'\x00\x00\x00\x00\x00\x01' 
+    m2 = p4runtime_pb2.FieldMatch()
+    m2.field_id = context.get_mf_id("MyIngress.l2_match_table", "hdr.ethernet.srcAddr") # 2
+    m2.exact.value = b'\x00\x00\x00\x00\x00\x02' 
+    table_entry.match.append(m1)
+    table_entry.match.append(m2)
+
+    action = table_entry.action.action
+    action.action_id = context.get_obj_id(P4Type.action, "MyIngress.forward") # 16838673 
+    param = p4runtime_pb2.Action.Param()    
+    param.param_id = context.get_param_id("MyIngress.forward", "port") # 1
+    param.value = b'\x00\x02' 
+    action.params.append(param)
+
+    print(req)
+    client.write(req)
+
+"""
+    equivalent commands on the CLI
+    te = table_entry["MyIngress.l2_match_table"](action="forward")
+    te.match["hdr.ethernet.dstAddr"] = dstMac # "00:00:00:00:00:02" # h2 
+    te.match["hdr.ethernet.srcAddr"] = srcMac # "00:00:00:00:00:01" # h1
+    te.action["port"] = port # "2"
+    print(te)
+"""
+
+""" 
+    ============================================================================== 
+    END OF Extenetion
+    ============================================================================== 
+"""
+
 
 def APIVersion():
     """
@@ -2444,6 +2627,11 @@ def main():
         "Write": Write,
         "Request": Request,
         "Watch": Watch,
+        "PacketIn": PacketIn,
+        "PacketOut": PacketOut,
+        "client": client,
+        "context": context,
+        "Test": Test,
         "Replica": Replica,
         "MulticastGroupEntry": MulticastGroupEntry,
         "CloneSessionEntry": CloneSessionEntry,

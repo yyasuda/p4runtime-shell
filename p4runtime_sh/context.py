@@ -27,6 +27,7 @@ class P4Type(enum.Enum):
     direct_counter = 5
     meter = 6
     direct_meter = 7
+    controller_packet_metadata = 8
 
 
 P4Type.table.p4info_name = "tables"
@@ -36,6 +37,7 @@ P4Type.counter.p4info_name = "counters"
 P4Type.direct_counter.p4info_name = "direct_counters"
 P4Type.meter.p4info_name = "meters"
 P4Type.direct_meter.p4info_name = "direct_meters"
+P4Type.controller_packet_metadata.p4info_name = "controller_packet_metadata"
 
 
 for obj_type in P4Type:
@@ -92,6 +94,14 @@ class Context:
             if mf.name == name:
                 return mf
 
+    def get_cpm(self, metadata_name, name):
+        c = self.get_obj(P4Type.controller_packet_metadata, metadata_name)
+        if c is None:
+            return None
+        for cpm in c.metadata:
+            if cpm.name == name:
+                return cpm
+
     def get_param_id(self, action_name, name):
         p = self.get_param(action_name, name)
         return None if p is None else p.id
@@ -99,6 +109,10 @@ class Context:
     def get_mf_id(self, table_name, name):
         mf = self.get_mf(table_name, name)
         return None if mf is None else mf.id
+
+    def get_cpm_id(self, metadata_name, name):
+        cpm = self.get_cpm(metadata_name, name)
+        return None if cpm is None else cpm.id
 
     def get_param_name(self, action_name, id_):
         a = self.get_obj(P4Type.action, action_name)
@@ -115,6 +129,14 @@ class Context:
         for mf in t.match_fields:
             if mf.id == id_:
                 return mf.name
+
+    def get_cpm_name(self, metadata_name, id_):
+        c = self.get_obj(P4Type.controller_packet_metadata, metadata_name)
+        if c is None:
+            return None
+        for cpm in c.metadata:
+            if cpm.id == id_:
+                return cpm.name
 
     def get_objs(self, obj_type):
         m = self.p4info_objs_by_type[obj_type]
